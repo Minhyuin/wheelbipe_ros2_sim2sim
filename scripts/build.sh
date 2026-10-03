@@ -28,9 +28,26 @@ done
 
 "${repository_root}/scripts/check_env.sh"
 
+ros_setup_file=""
+if [[ -n "${ROS_DISTRO:-}" && -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
+  ros_setup_file="/opt/ros/${ROS_DISTRO}/setup.bash"
+else
+  for candidate in jazzy humble; do
+    if [[ -f "/opt/ros/${candidate}/setup.bash" ]]; then
+      ros_setup_file="/opt/ros/${candidate}/setup.bash"
+      break
+    fi
+  done
+fi
+
+if [[ -z "${ros_setup_file}" ]]; then
+  echo "No ROS 2 installation found under /opt/ros; install ROS 2 Jazzy or Humble." >&2
+  exit 1
+fi
+
 set +u
 # shellcheck disable=SC1091
-source /opt/ros/humble/setup.bash
+source "${ros_setup_file}"
 # shellcheck disable=SC1091
 source "${repository_root}/setup_mujoco_env.bash"
 set -u

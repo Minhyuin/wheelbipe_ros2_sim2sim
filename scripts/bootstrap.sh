@@ -177,8 +177,15 @@ if [[ ! -f "${onnxruntime_dir}/lib/libonnxruntime.so" ]]; then
 fi
 
 if [[ "${install_ros_dependencies}" == true ]]; then
-  [[ -f /opt/ros/humble/setup.bash ]] || {
-    echo "ROS 2 Humble is required before bootstrap; see DEPLOY.md." >&2
+  ros_distro=""
+  for candidate in jazzy humble; do
+    if [[ -f "/opt/ros/${candidate}/setup.bash" ]]; then
+      ros_distro="${candidate}"
+      break
+    fi
+  done
+  [[ -n "${ros_distro}" ]] || {
+    echo "ROS 2 Jazzy or Humble is required before bootstrap; see DEPLOY.md." >&2
     exit 1
   }
   command -v rosdep >/dev/null 2>&1 || {
@@ -187,13 +194,13 @@ if [[ "${install_ros_dependencies}" == true ]]; then
   }
   set +u
   # shellcheck disable=SC1091
-  source /opt/ros/humble/setup.bash
+  source "/opt/ros/${ros_distro}/setup.bash"
   set -u
   if ! rosdep check --from-paths "${repository_root}/src" --ignore-src \
-    --rosdistro humble >/dev/null 2>&1; then
+    --rosdistro "${ros_distro}" >/dev/null 2>&1; then
     echo "[bootstrap] installing missing ROS and system dependencies with rosdep"
     rosdep install --from-paths "${repository_root}/src" --ignore-src \
-      --rosdistro humble --default-yes
+      --rosdistro "${ros_distro}" --default-yes
   fi
 fi
 

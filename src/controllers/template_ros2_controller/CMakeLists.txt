@@ -78,12 +78,14 @@ else()
     PATHS
       /usr/include/onnxruntime
       /usr/local/include/onnxruntime
+      /opt/ros/jazzy/opt/onnxruntime_vendor/include
       /opt/ros/humble/opt/onnxruntime_vendor/include
   )
   find_library(ONNXRUNTIME_LIBRARY onnxruntime
     PATHS
       /usr/lib
       /usr/local/lib
+      /opt/ros/jazzy/opt/onnxruntime_vendor/lib
       /opt/ros/humble/opt/onnxruntime_vendor/lib
   )
 endif()

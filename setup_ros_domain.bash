@@ -6,9 +6,20 @@ _wheelbipe_ros_domain_id="${ROS_DOMAIN_ID:-0}"
 _wheelbipe_ros_localhost_only="${ROS_LOCALHOST_ONLY:-1}"
 _wheelbipe_rmw_implementation="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
 
-if [ -f /opt/ros/humble/setup.bash ]; then
+# Prefer an already selected distro, then the newest supported one.
+_wheelbipe_ros_distro="${ROS_DISTRO:-}"
+if [ -z "${_wheelbipe_ros_distro}" ]; then
+  for _wheelbipe_ros_candidate in jazzy humble; do
+    if [ -f "/opt/ros/${_wheelbipe_ros_candidate}/setup.bash" ]; then
+      _wheelbipe_ros_distro="${_wheelbipe_ros_candidate}"
+      break
+    fi
+  done
+fi
+
+if [ -n "${_wheelbipe_ros_distro}" ] && [ -f "/opt/ros/${_wheelbipe_ros_distro}/setup.bash" ]; then
   # shellcheck disable=SC1091
-  source /opt/ros/humble/setup.bash
+  source "/opt/ros/${_wheelbipe_ros_distro}/setup.bash"
 fi
 
 if [ -f "${_wheelbipe_ws}/setup_mujoco_env.bash" ]; then
@@ -30,3 +41,4 @@ export RMW_IMPLEMENTATION="${_wheelbipe_rmw_implementation}"
 
 unset _wheelbipe_ws _wheelbipe_ros_domain_id _wheelbipe_ros_localhost_only
 unset _wheelbipe_rmw_implementation
+unset _wheelbipe_ros_distro _wheelbipe_ros_candidate

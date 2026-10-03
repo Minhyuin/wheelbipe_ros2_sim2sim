@@ -20,10 +20,18 @@ else
   failed=1
 fi
 
-if [[ -f /opt/ros/humble/setup.bash ]]; then
-  echo "[OK] ROS 2 Humble"
+ros_distro=""
+for candidate in jazzy humble; do
+  if [[ -f "/opt/ros/${candidate}/setup.bash" ]]; then
+    ros_distro="${candidate}"
+    break
+  fi
+done
+
+if [[ -n "${ros_distro}" ]]; then
+  echo "[OK] ROS 2 ${ros_distro} (/opt/ros/${ros_distro})"
 else
-  echo "[MISSING] /opt/ros/humble/setup.bash" >&2
+  echo "[MISSING] /opt/ros/{jazzy,humble}/setup.bash" >&2
   failed=1
 fi
 
