@@ -87,7 +87,7 @@ set +u
 source "${repository_root}/setup_ros_domain.bash"
 set -u
 
-export WHEELBIPE_RL_MODEL_PATH="${repository_root}/src/controllers/template_ros2_controller/policy/parallel/V14-35-flat-and-rotation-13k.onnx"
+export WHEELBIPE_RL_MODEL_PATH="${WHEELBIPE_RL_MODEL_PATH:-${repository_root}/src/controllers/template_ros2_controller/policy/parallel/V14-35-flat-and-rotation-13k.onnx}"
 
 auto_enter_rl=true
 if [[ "${backend}" == real && "${disable_dt7}" == false ]]; then
