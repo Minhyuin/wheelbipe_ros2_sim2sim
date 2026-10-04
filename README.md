@@ -67,6 +67,8 @@ ros2 run keyboard_teleop keyboard_teleop_node --ros-args \
 
 `0/1/2/3` 切换 INIT/IDLE/PREPARE/RL，`w/s` 控制前进速度，`a/d` 控制偏航角速度，`t/g` 调整高度。
 
+MuJoCo viewer 也可以直接操作：`Space` 暂停/继续，`Backspace` 复位；左键拖动旋转视角，右键拖动平移，滚轮缩放。按住 `Ctrl` 再用右键在机器人上按下并拖动即可对其施加外力，松开按键立即撤销，用于手动测试抗扰性；它与脚本注入的 `external_wrench` 话题可以叠加使用。
+
 依赖安装、离线部署和故障处理见 [DEPLOY.md](DEPLOY.md)；35D 索引、动作语义和所有公开参数见 [PARAMETERS.md](PARAMETERS.md)。
 
 ## 数据流

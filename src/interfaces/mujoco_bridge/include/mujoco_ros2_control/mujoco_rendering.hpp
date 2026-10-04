@@ -32,12 +32,17 @@ class MujocoRendering {
   void operator=(const MujocoRendering&) = delete;
 
   static MujocoRendering* get_instance();
+  /// Viewer instance, or nullptr when the viewer was never created (headless runs).
+  static MujocoRendering* get_instance_if_exists();
   void init(mjModel* mujoco_model, mjData* mujoco_data);
   bool is_close_flag_raised();
   bool is_paused() const;
   bool consume_reset_request();
   void update();
   void close();
+  /// Write the interactive drag perturbation into mjData->xfrc_applied. Must be
+  /// called immediately before stepping; no-op while no body is being dragged.
+  void apply_perturbation();
 
  private:
   MujocoRendering();
@@ -53,6 +58,7 @@ class MujocoRendering {
   void draw_control_buttons(const mjrRect& viewport);
   void draw_base_height_overlay(const mjrRect& viewport);
   bool handle_control_button_click(GLFWwindow* window, double xpos, double ypos);
+  bool select_body_for_perturbation(GLFWwindow* window, double xpos, double ypos);
   void request_reset();
   void toggle_pause();
 
@@ -69,6 +75,11 @@ class MujocoRendering {
   mjvOption mjv_opt_;
   mjvScene mjv_scn_;
   mjrContext mjr_con_;
+
+  // Interactive drag perturbation, driven by Ctrl + right-drag in the window.
+  mjvPerturb mjv_pert_;
+  // Framebuffer rectangle of the last rendered frame, used to pick bodies.
+  mjrRect last_viewport_;
 
   bool button_left_;
   bool button_middle_;

@@ -34,9 +34,13 @@ MujocoRendering* MujocoRendering::get_instance() {
   return instance_;
 }
 
+MujocoRendering* MujocoRendering::get_instance_if_exists() { return instance_; }
+
 MujocoRendering::MujocoRendering()
     : mj_model_(nullptr),
       mj_data_(nullptr),
+      mjv_pert_{},
+      last_viewport_{0, 0, 0, 0},
       button_left_(false),
       button_middle_(false),
       button_right_(false),
@@ -62,6 +66,7 @@ void MujocoRendering::init(mjModel* mujoco_model, mjData* mujoco_data) {
   mjv_defaultOption(&mjv_opt_);
   mjv_defaultScene(&mjv_scn_);
   mjr_defaultContext(&mjr_con_);
+  mjv_defaultPerturb(&mjv_pert_);
 
   mjv_cam_.type = mjCAMERA_FREE;
   mjv_cam_.distance = 8.;
@@ -99,12 +104,14 @@ void MujocoRendering::update() {
   mjrRect viewport = {0, 0, 0, 0};
   glfwGetFramebufferSize(window_, &viewport.width, &viewport.height);
   glfwMakeContextCurrent(window_);
+  last_viewport_ = viewport;
 
   // Reset the buffer
   mjr_setBuffer(mjFB_WINDOW, &mjr_con_);
 
   // update scene and render
-  mjv_updateScene(mj_model_, mj_data_, &mjv_opt_, NULL, &mjv_cam_, mjCAT_ALL, &mjv_scn_);
+  mjv_updateScene(mj_model_, mj_data_, &mjv_opt_, mjv_pert_.active ? &mjv_pert_ : NULL,
+                  &mjv_cam_, mjCAT_ALL, &mjv_scn_);
   mjr_render(viewport, &mjv_scn_, &mjr_con_);
   draw_control_buttons(viewport);
   draw_base_height_overlay(viewport);
@@ -242,7 +249,7 @@ void MujocoRendering::keyboard_callback_impl(GLFWwindow* /* window */, int key, 
 }
 
 void MujocoRendering::mouse_button_callback_impl(GLFWwindow* window, int button, int act,
-                                                 int /* mods */) {
+                                                 int mods) {
   if (button == GLFW_MOUSE_BUTTON_LEFT && act == GLFW_PRESS) {
     double xpos = 0.0;
     double ypos = 0.0;
@@ -257,8 +264,23 @@ void MujocoRendering::mouse_button_callback_impl(GLFWwindow* window, int button,
       return;
     }
   }
+
+  // Ctrl + right press grabs the body under the cursor and starts translating it;
+  // releasing the right button stops the perturbation.
+  if (button == GLFW_MOUSE_BUTTON_RIGHT && act == GLFW_PRESS && (mods & GLFW_MOD_CONTROL)) {
+    double xpos = 0.0;
+    double ypos = 0.0;
+    glfwGetCursorPos(window, &xpos, &ypos);
+    if (select_body_for_perturbation(window, xpos, ypos)) {
+      mjv_initPerturb(mj_model_, mj_data_, &mjv_scn_, &mjv_pert_);
+      mjv_pert_.active = mjPERT_TRANSLATE;
+    }
+  }
   if (act == GLFW_RELEASE) {
     ui_mouse_captured_ = false;
+    if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+      mjv_pert_.active = 0;
+    }
   }
 
   // update button state
@@ -304,14 +326,74 @@ void MujocoRendering::mouse_move_callback_impl(GLFWwindow* window, double xpos, 
     action = mjMOUSE_ZOOM;
   }
 
-  // move camera
-  mjv_moveCamera(mj_model_, action, dx / height, dy / height, &mjv_scn_, &mjv_cam_);
+  // move perturb or camera
+  if (mjv_pert_.active) {
+    // MuJoCo reference GUIs work in bottom-up window coordinates and flip the
+    // vertical cursor delta; GLFW reports it top-down, so `dy` is passed through
+    // unchanged, exactly like the camera branch below.
+    mjv_movePerturb(mj_model_, mj_data_, action, dx / height, dy / height, &mjv_scn_, &mjv_pert_);
+  } else {
+    mjv_moveCamera(mj_model_, action, dx / height, dy / height, &mjv_scn_, &mjv_cam_);
+  }
 }
 
 void MujocoRendering::scroll_callback_impl(GLFWwindow* /* window */, double /* xoffset */,
                                            double yoffset) {
   // emulate vertical mouse motion = 5% of window height
   mjv_moveCamera(mj_model_, mjMOUSE_ZOOM, 0, -0.05 * yoffset, &mjv_scn_, &mjv_cam_);
+}
+
+bool MujocoRendering::select_body_for_perturbation(GLFWwindow* window, double xpos, double ypos) {
+  int window_width = 0;
+  int window_height = 0;
+  int framebuffer_width = 0;
+  int framebuffer_height = 0;
+  glfwGetWindowSize(window, &window_width, &window_height);
+  glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
+  if (window_width <= 0 || window_height <= 0 || framebuffer_width <= 0 ||
+      framebuffer_height <= 0 || last_viewport_.width <= 0 || last_viewport_.height <= 0) {
+    return false;
+  }
+
+  const double x = xpos * static_cast<double>(framebuffer_width) / window_width;
+  const double y_from_top = ypos * static_cast<double>(framebuffer_height) / window_height;
+  const double relx = (x - last_viewport_.left) / last_viewport_.width;
+  // mjv_select measures the vertical coordinate from the bottom of the viewport.
+  const double rely = 1.0 - (y_from_top - last_viewport_.bottom) / last_viewport_.height;
+  if (relx < 0.0 || relx > 1.0 || rely < 0.0 || rely > 1.0) {
+    return false;
+  }
+
+  const mjtNum aspect =
+      static_cast<mjtNum>(last_viewport_.width) / static_cast<mjtNum>(last_viewport_.height);
+  mjtNum select_point[3] = {0.0, 0.0, 0.0};
+  int geom_id[1] = {-1};
+  int flex_id[1] = {-1};
+  int skin_id[1] = {-1};
+  const int body_id = mjv_select(mj_model_, mj_data_, &mjv_opt_, aspect, relx, rely, &mjv_scn_,
+                                 select_point, geom_id, flex_id, skin_id);
+  if (body_id <= 0) {
+    // Non-positive ids mean "nothing selected" or MuJoCo's world body.
+    mjv_pert_.select = 0;
+    return false;
+  }
+
+  mjv_pert_.select = body_id;
+  mjv_pert_.flexselect = flex_id[0];
+  mjv_pert_.skinselect = skin_id[0];
+
+  mjtNum offset[3];
+  mju_sub3(offset, select_point, mj_data_->xpos + 3 * body_id);
+  mju_mulMatTVec(mjv_pert_.localpos, mj_data_->xmat + 9 * body_id, offset, 3, 3);
+  return true;
+}
+
+void MujocoRendering::apply_perturbation() {
+  if (!mj_model_ || !mj_data_) {
+    return;
+  }
+  mjv_applyPerturbPose(mj_model_, mj_data_, &mjv_pert_, 0);  // mocap bodies only
+  mjv_applyPerturbForce(mj_model_, mj_data_, &mjv_pert_);
 }
 
 }  // namespace mujoco_ros2_control
