@@ -69,6 +69,8 @@ ros2 run keyboard_teleop keyboard_teleop_node --ros-args \
 
 MuJoCo viewer 也可以直接操作：`Space` 暂停/继续，`Backspace` 复位；左键拖动旋转视角，右键拖动平移，滚轮缩放。按住 `Ctrl` 再用右键在机器人上按下并拖动即可对其施加外力，松开按键立即撤销，用于手动测试抗扰性；它与脚本注入的 `external_wrench` 话题可以叠加使用。
 
+窗口左上角还有一个遥操作面板：三个滑块分别调目标腿高（0.20–0.40 m）、前进速度和偏航角速度，`Stop` 把两个速度清零，`INIT/IDLE/PREP/RL` 切换状态机。面板默认不发布，只把 keyboard_teleop 的指令镜像到滑块上；你抓住滑块或按下按钮时才接管这三个 topic（状态栏显示 `GUI cmd: on`），之后键盘再发指令会自动把控制权抢回去。
+
 依赖安装、离线部署和故障处理见 [DEPLOY.md](DEPLOY.md)；35D 索引、动作语义和所有公开参数见 [PARAMETERS.md](PARAMETERS.md)。
 
 ## 数据流

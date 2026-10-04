@@ -20,9 +20,82 @@
 
 #include "mujoco_ros2_control/mujoco_rendering.hpp"
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 
 namespace mujoco_ros2_control {
+namespace {
+
+// Control panel geometry in window coordinates with the origin at the top-left,
+// which is how GLFW reports the cursor. mjr draws with the origin at the
+// bottom-left, so every rectangle goes through to_mjr().
+constexpr int kMargin = 14;
+constexpr int kButtonWidth = 112;
+constexpr int kButtonHeight = 34;
+constexpr int kGap = 8;
+constexpr int kRowStep = kButtonHeight + kGap;
+constexpr int kLabelWidth = 150;
+constexpr int kTrackWidth = 260;
+constexpr int kTrackHeight = 18;
+constexpr int kTrackX = kMargin + kLabelWidth;
+constexpr int kStatusWidth = 500;
+constexpr int kStopWidth = 72;
+constexpr int kStateButtonWidth = 64;
+constexpr int kStateButtonCount = 4;
+constexpr int kSliderRows = 3;
+constexpr int kActionsRow = 4;
+constexpr int kStatusRow = 5;
+
+// The controller falls back to its safe defaults once commands stop arriving
+// (motion_command_timeout_sec in template_ros2_controller_parameters.yaml).
+constexpr double kTeleopTimeoutSec = 0.5;
+// Command values are compared against the last value this viewer published to
+// tell the echo of our own message apart from a keyboard command.
+constexpr double kCommandEpsilon = 1e-9;
+
+const char* const kStateNames[kStateButtonCount] = {"INIT", "IDLE", "PREP", "RL"};
+
+struct UiRect {
+  int x;
+  int y;  // distance from the top edge
+  int w;
+  int h;
+};
+
+// Convert a top-left anchored rectangle to mjr's bottom-left anchored one.
+mjrRect to_mjr(const UiRect& rect, int viewport_height) {
+  return {rect.x, viewport_height - rect.y - rect.h, rect.w, rect.h};
+}
+
+bool contains(const UiRect& rect, double x, double y) {
+  return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+}
+
+// Slider labels, ranges and units. The ranges mirror the controller clamps in
+// template_ros2_controller_parameters.yaml (command_height_min/max,
+// motion_linear_x_min/max, motion_angular_z_min/max).
+struct SliderSpec {
+  const char* label;
+  const char* unit;
+  double min;
+  double max;
+  int decimals;
+};
+
+constexpr SliderSpec kSliders[kSliderRows] = {
+    {"Leg height", "m", 0.20, 0.40, 3},
+    {"Linear vel", "m/s", -2.5, 2.5, 2},
+    {"Yaw rate", "rad/s", -3.0, 3.0, 2},
+};
+
+UiRect slider_track(int index) {
+  return {kTrackX, kMargin + kRowStep * (index + 1) + (kButtonHeight - kTrackHeight) / 2,
+          kTrackWidth, kTrackHeight};
+}
+
+}  // namespace
 
 MujocoRendering* MujocoRendering::instance_ = nullptr;
 
@@ -49,7 +122,20 @@ MujocoRendering::MujocoRendering()
       ui_mouse_captured_(false),
       base_body_id_(-1),
       lastx_(0.0),
-      lasty_(0.0) {}
+      lasty_(0.0),
+      viewer_teleop_enabled_(true),
+      viewer_owns_teleop_(false),
+      target_height_(0.22),
+      target_linear_x_(0.0),
+      target_angular_z_(0.0),
+      published_height_(0.22),
+      published_linear_x_(0.0),
+      published_angular_z_(0.0),
+      teleop_mirror_received_(false),
+      teleop_mirror_stamp_{},
+      live_state_(-1),
+      state_request_(-1),
+      active_slider_(-1) {}
 
 void MujocoRendering::init(mjModel* mujoco_model, mjData* mujoco_data) {
   mj_model_ = mujoco_model;
@@ -140,14 +226,12 @@ void MujocoRendering::close() {
 }
 
 void MujocoRendering::draw_control_buttons(const mjrRect& viewport) {
-  constexpr int margin = 14;
-  constexpr int width = 112;
-  constexpr int height = 34;
-  constexpr int gap = 8;
-  const int bottom = viewport.height - margin - height;
+  const int viewport_height = viewport.height;
 
-  mjrRect pause_rect = {margin, bottom, width, height};
-  mjrRect reset_rect = {margin + width + gap, bottom, width, height};
+  const mjrRect pause_rect =
+      to_mjr({kMargin, kMargin, kButtonWidth, kButtonHeight}, viewport_height);
+  const mjrRect reset_rect = to_mjr({kMargin + kButtonWidth + kGap, kMargin, kButtonWidth,
+                                     kButtonHeight}, viewport_height);
 
   mjr_rectangle(pause_rect, 0.08f, 0.10f, 0.12f, 0.78f);
   mjr_label(pause_rect, mjFONT_NORMAL, paused_ ? "Continue" : "Pause", 0.08f, 0.10f, 0.12f, 0.90f,
@@ -157,10 +241,75 @@ void MujocoRendering::draw_control_buttons(const mjrRect& viewport) {
   mjr_label(reset_rect, mjFONT_NORMAL, "Reset", 0.08f, 0.10f, 0.12f, 0.90f, 1.0f, 1.0f, 1.0f,
             &mjr_con_);
 
-  char status[96];
-  std::snprintf(status, sizeof(status), "%s | Space: pause/continue | Backspace: reset",
-                paused_ ? "Paused" : "Running");
-  mjrRect status_rect = {margin, bottom - height - gap, 2 * width + gap, height};
+  if (!viewer_teleop_enabled_) {
+    return;
+  }
+
+  const bool mirror_stale =
+      !teleop_mirror_received_ ||
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - teleop_mirror_stamp_)
+              .count() > kTeleopTimeoutSec;
+
+  for (int index = 0; index < kSliderRows; ++index) {
+    const SliderSpec& spec = kSliders[index];
+    const UiRect track = slider_track(index);
+    const mjrRect track_rect = to_mjr(track, viewport_height);
+
+    // The controller zeroes the velocity commands when they time out, so an idle
+    // mirror has to show 0 as well. The height command keeps its last value.
+    double display = slider_value(index);
+    if (!viewer_owns_teleop_ && mirror_stale && index > 0) {
+      display = 0.0;
+    }
+
+    const double fraction = std::clamp((display - spec.min) / (spec.max - spec.min), 0.0, 1.0);
+
+    mjr_rectangle(track_rect, 0.10f, 0.12f, 0.15f, 0.85f);
+    mjrRect filled = track_rect;
+    filled.width = static_cast<int>(track_rect.width * fraction);
+    mjr_rectangle(filled, 0.20f, 0.52f, 0.88f, 0.55f);
+    const int knob_left = std::clamp(track_rect.left + filled.width - 3, track_rect.left,
+                                     track_rect.left + track_rect.width - 6);
+    const mjrRect knob = {knob_left, track_rect.bottom - 4, 6, track_rect.height + 8};
+    mjr_rectangle(knob, 0.88f, 0.92f, 1.0f, 0.95f);
+
+    char value[32];
+    std::snprintf(value, sizeof(value), "%.*f %s", spec.decimals, display, spec.unit);
+
+    const int text_y = track.y - (kButtonHeight - kTrackHeight) / 2;
+    const mjrRect label_rect =
+        to_mjr({kMargin, text_y, kLabelWidth - 10, kButtonHeight}, viewport_height);
+    mjr_label(label_rect, mjFONT_NORMAL, spec.label, 0.02f, 0.03f, 0.04f, 0.55f, 0.86f, 0.89f,
+              0.93f, &mjr_con_);
+    const mjrRect value_rect =
+        to_mjr({kTrackX + kTrackWidth + 10, text_y, 110, kButtonHeight}, viewport_height);
+    mjr_label(value_rect, mjFONT_NORMAL, value, 0.02f, 0.03f, 0.04f, 0.55f, 0.95f, 0.97f, 1.0f,
+              &mjr_con_);
+  }
+
+  const int actions_y = kMargin + kRowStep * kActionsRow;
+  const mjrRect stop_rect =
+      to_mjr({kMargin, actions_y, kStopWidth, kButtonHeight}, viewport_height);
+  mjr_label(stop_rect, mjFONT_NORMAL, "Stop", 0.32f, 0.12f, 0.10f, 0.90f, 1.0f, 1.0f, 1.0f,
+            &mjr_con_);
+
+  for (int state = 0; state < kStateButtonCount; ++state) {
+    const int left = kMargin + kStopWidth + kGap + state * (kStateButtonWidth + kGap);
+    const mjrRect rect =
+        to_mjr({left, actions_y, kStateButtonWidth, kButtonHeight}, viewport_height);
+    const bool active = live_state_ == state;
+    const float background[3] = {active ? 0.16f : 0.08f, active ? 0.42f : 0.10f,
+                                 active ? 0.62f : 0.12f};
+    mjr_label(rect, mjFONT_NORMAL, kStateNames[state], background[0], background[1], background[2],
+              0.88f, 1.0f, 1.0f, 1.0f, &mjr_con_);
+  }
+
+  char status[160];
+  std::snprintf(status, sizeof(status), "%s | GUI cmd: %s | Space: pause | Backspace: reset",
+                paused_ ? "Paused" : "Running", viewer_owns_teleop_ ? "on" : "off");
+  const mjrRect status_rect =
+      to_mjr({kMargin, kMargin + kRowStep * kStatusRow, kStatusWidth, kButtonHeight},
+             viewport_height);
   mjr_label(status_rect, mjFONT_NORMAL, status, 0.02f, 0.03f, 0.04f, 0.64f, 0.90f, 0.95f, 1.0f,
             &mjr_con_);
 }
@@ -193,21 +342,50 @@ bool MujocoRendering::handle_control_button_click(GLFWwindow* window, double xpo
       xpos * static_cast<double>(framebuffer_width) / static_cast<double>(window_width);
   const double y_from_top =
       ypos * static_cast<double>(framebuffer_height) / static_cast<double>(window_height);
-  constexpr int margin = 14;
-  constexpr int width = 112;
-  constexpr int height = 34;
-  constexpr int gap = 8;
 
-  auto inside = [&](int left, int top) {
-    return x >= left && x <= left + width && y_from_top >= top && y_from_top <= top + height;
-  };
-
-  if (inside(margin, margin)) {
+  if (contains({kMargin, kMargin, kButtonWidth, kButtonHeight}, x, y_from_top)) {
     toggle_pause();
     return true;
   }
-  if (inside(margin + width + gap, margin)) {
+  if (contains({kMargin + kButtonWidth + kGap, kMargin, kButtonWidth, kButtonHeight}, x, y_from_top)) {
     request_reset();
+    return true;
+  }
+
+  if (!viewer_teleop_enabled_) {
+    return false;
+  }
+
+  for (int index = 0; index < kSliderRows; ++index) {
+    const UiRect track = slider_track(index);
+    // Grab the full row height, not just the thin rail.
+    if (contains({track.x, track.y - 8, track.w, track.h + 16}, x, y_from_top)) {
+      active_slider_ = index;
+      set_slider_from_window_x(index, x);
+      return true;
+    }
+  }
+
+  const int actions_y = kMargin + kRowStep * kActionsRow;
+  if (contains({kMargin, actions_y, kStopWidth, kButtonHeight}, x, y_from_top)) {
+    target_linear_x_ = 0.0;
+    target_angular_z_ = 0.0;
+    viewer_owns_teleop_ = true;
+    return true;
+  }
+
+  for (int state = 0; state < kStateButtonCount; ++state) {
+    const int left = kMargin + kStopWidth + kGap + state * (kStateButtonWidth + kGap);
+    if (contains({left, actions_y, kStateButtonWidth, kButtonHeight}, x, y_from_top)) {
+      state_request_ = state;
+      return true;
+    }
+  }
+
+  // The status line doubles as the GUI/keyboard handover toggle.
+  if (contains({kMargin, kMargin + kRowStep * kStatusRow, kStatusWidth, kButtonHeight}, x,
+               y_from_top)) {
+    viewer_owns_teleop_ = !viewer_owns_teleop_;
     return true;
   }
 
@@ -217,6 +395,115 @@ bool MujocoRendering::handle_control_button_click(GLFWwindow* window, double xpo
 void MujocoRendering::request_reset() { reset_requested_ = true; }
 
 void MujocoRendering::toggle_pause() { paused_ = !paused_; }
+
+void MujocoRendering::apply_slider_drag(GLFWwindow* window, double xpos) {
+  int window_width = 0;
+  int window_height = 0;
+  int framebuffer_width = 0;
+  int framebuffer_height = 0;
+  glfwGetWindowSize(window, &window_width, &window_height);
+  glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
+  if (window_width <= 0 || framebuffer_width <= 0) {
+    return;
+  }
+  set_slider_from_window_x(active_slider_, xpos * static_cast<double>(framebuffer_width) /
+                                              static_cast<double>(window_width));
+}
+
+void MujocoRendering::set_slider_from_window_x(int index, double x) {
+  if (index < 0 || index >= kSliderRows) {
+    return;
+  }
+  const UiRect track = slider_track(index);
+  const SliderSpec& spec = kSliders[index];
+  const double fraction = std::clamp((x - track.x) / static_cast<double>(track.w), 0.0, 1.0);
+  const double value = spec.min + fraction * (spec.max - spec.min);
+  switch (index) {
+    case 0:
+      target_height_ = value;
+      break;
+    case 1:
+      target_linear_x_ = value;
+      break;
+    default:
+      target_angular_z_ = value;
+      break;
+  }
+  viewer_owns_teleop_ = true;
+}
+
+double MujocoRendering::slider_value(int index) const {
+  switch (index) {
+    case 0:
+      return target_height_;
+    case 1:
+      return target_linear_x_;
+    default:
+      return target_angular_z_;
+  }
+}
+
+void MujocoRendering::set_viewer_teleop_enabled(bool enabled) {
+  if (viewer_teleop_enabled_ == enabled) {
+    return;
+  }
+  viewer_teleop_enabled_ = enabled;
+  if (!enabled) {
+    viewer_owns_teleop_ = false;
+    active_slider_ = -1;
+  }
+}
+
+bool MujocoRendering::viewer_teleop_enabled() const { return viewer_teleop_enabled_; }
+
+bool MujocoRendering::viewer_owns_teleop() const { return viewer_owns_teleop_; }
+
+double MujocoRendering::target_height() const { return target_height_; }
+
+double MujocoRendering::target_linear_velocity() const { return target_linear_x_; }
+
+double MujocoRendering::target_angular_velocity() const { return target_angular_z_; }
+
+void MujocoRendering::note_published_teleop_command(double height, double linear_x,
+                                                   double angular_z) {
+  published_height_ = height;
+  published_linear_x_ = linear_x;
+  published_angular_z_ = angular_z;
+}
+
+void MujocoRendering::mirror_teleop_velocity(double linear_x, double angular_z) {
+  teleop_mirror_received_ = true;
+  teleop_mirror_stamp_ = std::chrono::steady_clock::now();
+  if (std::abs(linear_x - published_linear_x_) <= kCommandEpsilon &&
+      std::abs(angular_z - published_angular_z_) <= kCommandEpsilon) {
+    return;  // Echo of the value this viewer just published.
+  }
+  // Somebody else is driving the velocity topics; hand control back to them.
+  viewer_owns_teleop_ = false;
+  target_linear_x_ = linear_x;
+  target_angular_z_ = angular_z;
+}
+
+void MujocoRendering::mirror_teleop_height(double height) {
+  teleop_mirror_received_ = true;
+  teleop_mirror_stamp_ = std::chrono::steady_clock::now();
+  if (std::abs(height - published_height_) <= kCommandEpsilon) {
+    return;  // Echo of the value this viewer just published.
+  }
+  viewer_owns_teleop_ = false;
+  target_height_ = height;
+}
+
+void MujocoRendering::set_live_state(int state) { live_state_ = state; }
+
+bool MujocoRendering::consume_state_request(int& state) {
+  if (state_request_ < 0) {
+    return false;
+  }
+  state = state_request_;
+  state_request_ = -1;
+  return true;
+}
 
 void MujocoRendering::keyboard_callback(GLFWwindow* window, int key, int scancode, int act,
                                         int mods) {
@@ -282,6 +569,7 @@ void MujocoRendering::mouse_button_callback_impl(GLFWwindow* window, int button,
   }
   if (act == GLFW_RELEASE) {
     ui_mouse_captured_ = false;
+    active_slider_ = -1;
     if (button == GLFW_MOUSE_BUTTON_RIGHT) {
       mjv_pert_.active = 0;
     }
@@ -297,6 +585,20 @@ void MujocoRendering::mouse_button_callback_impl(GLFWwindow* window, int button,
 }
 
 void MujocoRendering::mouse_move_callback_impl(GLFWwindow* window, double xpos, double ypos) {
+  if (active_slider_ >= 0) {
+    if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) != GLFW_PRESS) {
+      // The button was released outside the window, so GLFW never delivered the
+      // release event: end the drag here instead of following the cursor.
+      active_slider_ = -1;
+      ui_mouse_captured_ = false;
+      return;
+    }
+    apply_slider_drag(window, xpos);
+    lastx_ = xpos;
+    lasty_ = ypos;
+    return;
+  }
+
   if (ui_mouse_captured_) {
     return;
   }

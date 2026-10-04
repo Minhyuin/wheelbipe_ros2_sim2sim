@@ -29,13 +29,16 @@
 #include <thread>
 
 #include "controller_manager/controller_manager.hpp"
+#include "geometry_msgs/msg/twist.hpp"
 #include "mujoco/mujoco.h"
 #include "mujoco_ros2_control/mujoco_system.hpp"
 #include "pluginlib/class_loader.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rosgraph_msgs/msg/clock.hpp"
 #include "sensor_msgs/msg/imu.hpp"
+#include "std_msgs/msg/float64.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
+#include "std_msgs/msg/int32.hpp"
 
 namespace mujoco_ros2_control {
 class MujocoRos2Control {
@@ -56,6 +59,12 @@ class MujocoRos2Control {
   /// external wrench topic. Call once per step, right before mj_step1.
   void apply_external_forces();
   void external_wrench_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
+  /// Publish the viewer sliders' targets and mirror commands from other
+  /// publishers (keyboard_teleop) back into the viewer panel.
+  void update_viewer_teleop();
+  void mirror_teleop_velocity_callback(const geometry_msgs::msg::Twist::SharedPtr msg);
+  void mirror_teleop_height_callback(const std_msgs::msg::Float64::SharedPtr msg);
+  void current_state_callback(const std_msgs::msg::Int32::SharedPtr msg);
   std::string get_robot_description();
   rclcpp::Node::SharedPtr node_;
   mjModel* mj_model_;
@@ -101,6 +110,19 @@ class MujocoRos2Control {
   bool external_wrench_received_{false};
   std::chrono::steady_clock::time_point external_wrench_stamp_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr external_wrench_subscription_;
+
+  /// Viewer teleop panel: publishes the slider targets on the command topics
+  /// that keyboard_teleop uses and mirrors everything published there back into
+  /// the panel. Disabled with the `viewer_teleop` parameter.
+  bool viewer_teleop_{true};
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr viewer_motion_publisher_;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr viewer_height_publisher_;
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr viewer_state_publisher_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr viewer_motion_subscription_;
+  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr viewer_height_subscription_;
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr current_state_subscription_;
+  int live_state_{-1};
+  std::chrono::steady_clock::time_point last_viewer_publish_{};
 };
 }  // namespace mujoco_ros2_control
 

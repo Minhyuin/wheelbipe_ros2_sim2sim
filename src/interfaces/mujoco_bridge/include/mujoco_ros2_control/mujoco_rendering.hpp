@@ -21,6 +21,8 @@
 #ifndef MUJOCO_ROS2_CONTROL__MUJOCO_RENDERING_HPP_
 #define MUJOCO_ROS2_CONTROL__MUJOCO_RENDERING_HPP_
 
+#include <chrono>
+
 #include "GLFW/glfw3.h"
 #include "mujoco/mujoco.h"
 
@@ -44,6 +46,28 @@ class MujocoRendering {
   /// called immediately before stepping; no-op while no body is being dragged.
   void apply_perturbation();
 
+  /// Teleop panel (sliders plus the state row). The panel mirrors the commands
+  /// keyboard_teleop publishes on the command topics, and only takes those
+  /// topics over once one of its widgets is used.
+  void set_viewer_teleop_enabled(bool enabled);
+  bool viewer_teleop_enabled() const;
+  bool viewer_owns_teleop() const;
+  double target_height() const;
+  double target_linear_velocity() const;
+  double target_angular_velocity() const;
+  /// Record the command the ROS bridge just published, so the copy of our own
+  /// message coming back through the subscription is not mistaken for keyboard
+  /// input.
+  void note_published_teleop_command(double height, double linear_x, double angular_z);
+  /// Mirror a message published on the command topics by another node. Our own
+  /// echo is ignored; any other value takes control back from the viewer.
+  void mirror_teleop_velocity(double linear_x, double angular_z);
+  void mirror_teleop_height(double height);
+  /// State reported by the controller's `current_state`, used to highlight the
+  /// matching state button. Pass a negative value when unknown.
+  void set_live_state(int state);
+  bool consume_state_request(int& state);
+
  private:
   MujocoRendering();
   static void keyboard_callback(GLFWwindow* window, int key, int scancode, int act, int mods);
@@ -58,6 +82,9 @@ class MujocoRendering {
   void draw_control_buttons(const mjrRect& viewport);
   void draw_base_height_overlay(const mjrRect& viewport);
   bool handle_control_button_click(GLFWwindow* window, double xpos, double ypos);
+  void apply_slider_drag(GLFWwindow* window, double xpos);
+  void set_slider_from_window_x(int index, double x);
+  double slider_value(int index) const;
   bool select_body_for_perturbation(GLFWwindow* window, double xpos, double ypos);
   void request_reset();
   void toggle_pause();
@@ -90,6 +117,23 @@ class MujocoRendering {
   int base_body_id_;
   double lastx_;
   double lasty_;
+
+  // Teleop panel state, shared with the ROS bridge.
+  bool viewer_teleop_enabled_;
+  bool viewer_owns_teleop_;
+  double target_height_;
+  double target_linear_x_;
+  double target_angular_z_;
+  // Last command this viewer published, used to recognize the echo of our own
+  // messages on the command subscriptions.
+  double published_height_;
+  double published_linear_x_;
+  double published_angular_z_;
+  bool teleop_mirror_received_;
+  std::chrono::steady_clock::time_point teleop_mirror_stamp_;
+  int live_state_;
+  int state_request_;
+  int active_slider_;
 };
 }  // namespace mujoco_ros2_control
 

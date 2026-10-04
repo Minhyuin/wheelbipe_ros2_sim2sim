@@ -157,6 +157,16 @@ ros2 topic pub -r 50 /wheelbipe_V14/external_wrench \
   std_msgs/msg/Float64MultiArray "{data: [0.0, 20.0, 0.0, 0.0, 0.0, 0.0]}"
 ```
 
+### Viewer 遥操作面板（Sim2Sim）
+
+`render=true` 时，窗口左上角除 `Pause`/`Reset` 外还有三个滑块（目标腿高、前进速度、偏航角速度）、`Stop` 和 `INIT/IDLE/PREP/RL`。滑块范围与控制器限幅一致：腿高 0.20–0.40 m、线速度 ±2.5 m/s、偏航 ±3.0 rad/s。
+
+面板默认**不发布**，只把其它节点（例如 `keyboard_teleop`）发到 `motion_command`、`height_command` 的值镜像到滑块上；点击或拖动任意控件后，面板才以 20 Hz 开始发布这三个 topic（状态栏显示 `GUI cmd: on`）。此时若又收到别的节点发来的不同指令，控制权自动交还，避免两个 20 Hz 发布者互相覆盖。控制器的 0.5 s 指令超时同样反映在显示上：速度指令超时后滑块回到 0。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `viewer_teleop` | `true` | 为窗口面板创建指令发布/订阅；关闭后窗口只剩 `Pause`/`Reset` |
+
 ## 6. Bringup 参数
 
 `template_bring_up.launch.py`：

@@ -349,8 +349,119 @@ bool MujocoRos2Control::init() {
     }
   }
 
+  if (!node_->has_parameter("viewer_teleop")) {
+    node_->declare_parameter<bool>("viewer_teleop", true);
+  }
+  viewer_teleop_ = node_->get_parameter("viewer_teleop").as_bool();
+  if (viewer_teleop_) {
+    // Same QoS as keyboard_teleop so both can drive the controller's best-effort
+    // command subscribers.
+    auto command_qos = rclcpp::QoS(rclcpp::KeepLast(1));
+    command_qos.best_effort();
+    command_qos.durability_volatile();
+
+    viewer_motion_publisher_ =
+        node_->create_publisher<geometry_msgs::msg::Twist>("motion_command", command_qos);
+    viewer_height_publisher_ =
+        node_->create_publisher<std_msgs::msg::Float64>("height_command", command_qos);
+    viewer_state_publisher_ =
+        node_->create_publisher<std_msgs::msg::Int32>("state_command", command_qos);
+
+    viewer_motion_subscription_ = node_->create_subscription<geometry_msgs::msg::Twist>(
+        "motion_command", command_qos,
+        [this](const geometry_msgs::msg::Twist::SharedPtr msg) {
+          mirror_teleop_velocity_callback(msg);
+        });
+    viewer_height_subscription_ = node_->create_subscription<std_msgs::msg::Float64>(
+        "height_command", command_qos,
+        [this](const std_msgs::msg::Float64::SharedPtr msg) {
+          mirror_teleop_height_callback(msg);
+        });
+    current_state_subscription_ = node_->create_subscription<std_msgs::msg::Int32>(
+        "current_state", command_qos,
+        [this](const std_msgs::msg::Int32::SharedPtr msg) { current_state_callback(msg); });
+
+    RCLCPP_INFO(logger_,
+                "Viewer teleop panel enabled: sliders drive '%s', '%s' and '%s' and mirror "
+                "commands published by keyboard_teleop",
+                viewer_motion_publisher_->get_topic_name(),
+                viewer_height_publisher_->get_topic_name(),
+                viewer_state_publisher_->get_topic_name());
+  } else {
+    RCLCPP_INFO(logger_, "Viewer teleop panel disabled (viewer_teleop=false)");
+  }
+
   initialized_ = true;
   return true;
+}
+
+void MujocoRos2Control::update_viewer_teleop() {
+  auto* rendering = MujocoRendering::get_instance_if_exists();
+  if (!rendering) {
+    return;
+  }
+  rendering->set_viewer_teleop_enabled(viewer_teleop_);
+  if (!viewer_teleop_ || !viewer_motion_publisher_ || !viewer_height_publisher_) {
+    return;
+  }
+
+  int requested_state = -1;
+  if (rendering->consume_state_request(requested_state)) {
+    std_msgs::msg::Int32 state_message;
+    state_message.data = requested_state;
+    viewer_state_publisher_->publish(state_message);
+  }
+
+  // The controller drops commands that are older than
+  // motion_command_timeout_sec, so the panel keeps publishing while it owns the
+  // topics instead of sending one message per interaction.
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last_viewer_publish_ < std::chrono::milliseconds(50)) {
+    return;
+  }
+  last_viewer_publish_ = now;
+  if (!rendering->viewer_owns_teleop()) {
+    return;
+  }
+
+  geometry_msgs::msg::Twist motion;
+  motion.linear.x = rendering->target_linear_velocity();
+  motion.angular.z = rendering->target_angular_velocity();
+  viewer_motion_publisher_->publish(motion);
+
+  std_msgs::msg::Float64 height;
+  height.data = rendering->target_height();
+  viewer_height_publisher_->publish(height);
+
+  rendering->note_published_teleop_command(height.data, motion.linear.x, motion.angular.z);
+}
+
+void MujocoRos2Control::mirror_teleop_velocity_callback(
+    const geometry_msgs::msg::Twist::SharedPtr msg) {
+  auto* rendering = MujocoRendering::get_instance_if_exists();
+  if (!rendering || !msg) {
+    return;
+  }
+  rendering->mirror_teleop_velocity(msg->linear.x, msg->angular.z);
+}
+
+void MujocoRos2Control::mirror_teleop_height_callback(
+    const std_msgs::msg::Float64::SharedPtr msg) {
+  auto* rendering = MujocoRendering::get_instance_if_exists();
+  if (!rendering || !msg) {
+    return;
+  }
+  rendering->mirror_teleop_height(msg->data);
+}
+
+void MujocoRos2Control::current_state_callback(const std_msgs::msg::Int32::SharedPtr msg) {
+  if (!msg) {
+    return;
+  }
+  live_state_ = msg->data;
+  if (auto* rendering = MujocoRendering::get_instance_if_exists()) {
+    rendering->set_live_state(live_state_);
+  }
 }
 
 void MujocoRos2Control::update() {
@@ -389,6 +500,8 @@ void MujocoRos2Control::update() {
   if (sim_period >= control_period_) {
     publish_wheel_contact_force_if_enabled();
   }
+
+  update_viewer_teleop();
 }
 
 void MujocoRos2Control::reset_sim_time() {
