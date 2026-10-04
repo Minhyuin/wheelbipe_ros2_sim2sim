@@ -75,6 +75,10 @@ void MujocoRendering::init(mjModel* mujoco_model, mjData* mujoco_data) {
   // create scene and context
   mjv_makeScene(mj_model_, &mjv_scn_, 2000);
   mjr_makeContext(mj_model_, &mjr_con_, mjFONTSCALE_150);
+  // The checker floor has reflectance 0.2 and mirrors the robot, which is noisy
+  // when inspecting the gait. mjv_makeScene resets the render flags, so this has
+  // to come after it. The floor texture, shadows and skybox stay enabled.
+  mjv_scn_.flags[mjRND_REFLECTION] = 0;
 
   // install GLFW mouse and keyboard callbacks
   glfwSetKeyCallback(window_, &MujocoRendering::keyboard_callback);
