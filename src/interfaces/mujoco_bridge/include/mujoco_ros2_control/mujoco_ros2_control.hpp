@@ -23,6 +23,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
@@ -51,6 +52,10 @@ class MujocoRos2Control {
   void publish_base_state_if_enabled();
   void publish_wheel_contact_force_if_enabled();
   double wheel_ground_contact_force_magnitude(int wheel_geom_id) const;
+  /// Rebuild mjData->xfrc_applied from the interactive drag perturbation and the
+  /// external wrench topic. Call once per step, right before mj_step1.
+  void apply_external_forces();
+  void external_wrench_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
   std::string get_robot_description();
   rclcpp::Node::SharedPtr node_;
   mjModel* mj_model_;
@@ -85,6 +90,17 @@ class MujocoRos2Control {
   bool publish_wheel_contact_force_{true};
   std::array<int, 2> wheel_geom_ids_{{-1, -1}};
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr wheel_contact_force_publisher_;
+
+  /// External wrench injected on one body through `external_wrench_topic`:
+  /// [fx, fy, fz, tx, ty, tz] in the world frame, released once the publisher
+  /// stops sending for `external_wrench_timeout_ms`.
+  bool publish_external_wrench_{true};
+  int external_wrench_body_id_{-1};
+  double external_wrench_timeout_ms_{200.0};
+  std::array<double, 6> external_wrench_{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+  bool external_wrench_received_{false};
+  std::chrono::steady_clock::time_point external_wrench_stamp_;
+  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr external_wrench_subscription_;
 };
 }  // namespace mujoco_ros2_control
 

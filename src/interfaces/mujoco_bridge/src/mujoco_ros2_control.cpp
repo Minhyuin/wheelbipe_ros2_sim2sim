@@ -20,10 +20,14 @@
 
 #include "mujoco_ros2_control/mujoco_ros2_control.hpp"
 
+#include <algorithm>
+#include <chrono>
+
 #include "hardware_interface/component_parser.hpp"
 #include "hardware_interface/resource_manager.hpp"
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/version.h"
+#include "mujoco_ros2_control/mujoco_rendering.hpp"
 
 namespace mujoco_ros2_control {
 namespace {
@@ -306,6 +310,45 @@ bool MujocoRos2Control::init() {
     }
   }
 
+  if (!node_->has_parameter("publish_external_wrench")) {
+    node_->declare_parameter<bool>("publish_external_wrench", true);
+  }
+  if (!node_->has_parameter("external_wrench_topic")) {
+    node_->declare_parameter<std::string>("external_wrench_topic", "external_wrench");
+  }
+  if (!node_->has_parameter("external_wrench_body")) {
+    node_->declare_parameter<std::string>("external_wrench_body", "base_link");
+  }
+  if (!node_->has_parameter("external_wrench_timeout_ms")) {
+    node_->declare_parameter<double>("external_wrench_timeout_ms", 200.0);
+  }
+  publish_external_wrench_ = node_->get_parameter("publish_external_wrench").as_bool();
+  external_wrench_timeout_ms_ = node_->get_parameter("external_wrench_timeout_ms").as_double();
+  if (publish_external_wrench_) {
+    const std::string wrench_body = node_->get_parameter("external_wrench_body").as_string();
+    external_wrench_body_id_ = mj_name2id(mj_model_, mjOBJ_BODY, wrench_body.c_str());
+    if (external_wrench_body_id_ <= 0) {
+      RCLCPP_WARN(logger_,
+                  "External wrench input enabled but MuJoCo body '%s' was not found (id=%d). "
+                  "The external wrench topic will not be available.",
+                  wrench_body.c_str(), external_wrench_body_id_);
+      publish_external_wrench_ = false;
+    } else {
+      const std::string wrench_topic =
+          node_->get_parameter("external_wrench_topic").as_string();
+      external_wrench_subscription_ =
+          node_->create_subscription<std_msgs::msg::Float64MultiArray>(
+              wrench_topic, rclcpp::QoS(10),
+              [this](const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+                external_wrench_callback(msg);
+              });
+      RCLCPP_INFO(logger_,
+                  "Accepting world-frame [fx, fy, fz, tx, ty, tz] external wrenches on '%s' for body "
+                  "'%s' (released %.1f ms after the last message)",
+                  wrench_topic.c_str(), wrench_body.c_str(), external_wrench_timeout_ms_);
+    }
+  }
+
   initialized_ = true;
   return true;
 }
@@ -325,6 +368,8 @@ void MujocoRos2Control::update() {
   rclcpp::Duration sim_period = sim_time_ros - last_update_sim_time_ros_;
 
   publish_sim_time(sim_time_ros);
+
+  apply_external_forces();
 
   mj_step1(mj_model_, mj_data_);
 
@@ -361,6 +406,49 @@ void MujocoRos2Control::publish_sim_time(rclcpp::Time sim_time) {
   rosgraph_msgs::msg::Clock sim_time_msg;
   sim_time_msg.clock = sim_time;
   clock_publisher_->publish(sim_time_msg);
+}
+
+void MujocoRos2Control::apply_external_forces() {
+  // The drag perturbation and the wrench topic are the only writers of
+  // xfrc_applied, so rebuild it from scratch on every step instead of relying on
+  // MuJoCo to clear it.
+  std::fill(mj_data_->xfrc_applied, mj_data_->xfrc_applied + 6 * mj_model_->nbody, 0.0);
+
+  if (auto* rendering = MujocoRendering::get_instance_if_exists()) {
+    rendering->apply_perturbation();
+  }
+
+  if (!publish_external_wrench_ || external_wrench_body_id_ <= 0 || !external_wrench_received_) {
+    return;
+  }
+  if (external_wrench_timeout_ms_ > 0.0) {
+    const std::chrono::duration<double, std::milli> age =
+        std::chrono::steady_clock::now() - external_wrench_stamp_;
+    if (age.count() > external_wrench_timeout_ms_) {
+      return;
+    }
+  }
+
+  // Add on top of the perturbation so a dragged body can still receive both.
+  mjtNum* target = mj_data_->xfrc_applied + 6 * external_wrench_body_id_;
+  for (size_t index = 0; index < external_wrench_.size(); ++index) {
+    target[index] += external_wrench_[index];
+  }
+}
+
+void MujocoRos2Control::external_wrench_callback(
+    const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
+  if (msg->data.size() < 6) {
+    RCLCPP_WARN_THROTTLE(logger_, *node_->get_clock(), 2000,
+                         "external_wrench expects [fx, fy, fz, tx, ty, tz]; got %zu values",
+                         msg->data.size());
+    return;
+  }
+  for (size_t index = 0; index < external_wrench_.size(); ++index) {
+    external_wrench_[index] = msg->data[index];
+  }
+  external_wrench_stamp_ = std::chrono::steady_clock::now();
+  external_wrench_received_ = true;
 }
 
 void MujocoRos2Control::publish_imu_if_enabled(const rclcpp::Time& sim_time) {

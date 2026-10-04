@@ -130,6 +130,7 @@ ONNX Runtime 启动时严格检查单输入输出、名称、类型和静态 sha
 | `motion_command` | `geometry_msgs/msg/Twist` | 输入 | `linear.x`、`angular.z` |
 | `height_command` | `std_msgs/msg/Float64` | 输入 | 目标高度，clamp 到 0.20–0.40 m |
 | `state_command` | `std_msgs/msg/Int32` | 输入 | FSM 状态切换 |
+| `external_wrench` | `std_msgs/msg/Float64MultiArray` | 输入 | 世界系 `[fx, fy, fz, tx, ty, tz]`，作用于 `base_link`；仅 Sim2Sim |
 | `current_state` | `std_msgs/msg/Int32` | 输出 | 当前 FSM 状态 |
 | `joint_commands` | `sensor_msgs/msg/JointState` | 输出 | 关节目标调试信息 |
 | `joint_final_torque` | `std_msgs/msg/Float64MultiArray` | 输出 | 最终八关节力矩 |
@@ -139,6 +140,22 @@ ONNX Runtime 启动时严格检查单输入输出、名称、类型和静态 sha
 状态 ID：`0=INIT`、`1=IDLE`、`2=PREPARE`、`3=RL`。normal-only 是策略观测合同，不增加新的状态 ID 或切换 topic。
 
 真机 `use_dt7=true` 时，控制器还申请四个只读状态接口：`dt7/cmd_state`、`dt7/cmd_vel_x`、`dt7/cmd_omega_z`、`dt7/cmd_height`。它们分别映射 FSM、前进速度、偏航角速度和高度；速度与高度仍应用上表限幅。`cmd_state` 只接受 `0–3`，通信包不含 jump 字段。
+
+### 外力注入（Sim2Sim）
+
+`external_wrench` 只在 Sim2Sim（`MujocoSystem`）下创建，用于脚本化、可复现地施加扰动。6 个元素是世界系力/力矩，语义与 MuJoCo `xfrc_applied` 一致，绕受力 body 的质心作用。超过超时时间未收到新消息即自动归零，因此持续施力需要周期性重发（例如 50 Hz）。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `publish_external_wrench` | `true` | 关闭后不创建该订阅 |
+| `external_wrench_topic` | `external_wrench` | 相对 topic 名 |
+| `external_wrench_body` | `base_link` | 受力 body，名字必须存在于 MJCF 中 |
+| `external_wrench_timeout_ms` | `200.0` | 最后一条消息后的保持时间；`0` 表示不自动卸力 |
+
+```bash
+ros2 topic pub -r 50 /wheelbipe_V14/external_wrench \
+  std_msgs/msg/Float64MultiArray "{data: [0.0, 20.0, 0.0, 0.0, 0.0, 0.0]}"
+```
 
 ## 6. Bringup 参数
 
